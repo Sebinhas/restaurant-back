@@ -6,36 +6,25 @@ const orderModel = {
     try {
       await client.query('BEGIN');
 
-      // Calculate total (assuming dish prices are needed from dishes table)
-      let total = 0;
-      // A more robust implementation would fetch dish prices from the 'dishes' table
-      // For simplicity, let's assume dish objects in the input 'dishes' array have a 'price' property
-      if (dishes && dishes.length > 0) {
-        // In a real app, fetch dish prices from DB using dish_id
-        // const dishIds = dishes.map(d => d.dish_id);
-        // const dishPrices = await client.query('SELECT id, price FROM dishes WHERE id = ANY($1)', [dishIds]);
-        // const priceMap = new Map(dishPrices.rows.map(item => [item.id, item.price]));
-        // total = dishes.reduce((sum, item) => sum + (priceMap.get(item.dish_id) || 0) * item.quantity, 0);
-        // For now, using price from input (less safe/accurate)
-         total = dishes.reduce((sum, item) => sum + (item.price || 0) * item.quantity, 0);
-      }
+      // Crear la orden
+      const orderResult = await client.query(
+        'INSERT INTO orders (customer_id) VALUES ($1) RETURNING *',
+        [customer_id]
+      );
+      const order = orderResult.rows[0];
 
-      // Insert into orders table
-      const orderQuery = 'INSERT INTO orders (customer_id, order_date, total) VALUES ($1, NOW(), $2) RETURNING id';
-      const orderValues = [customer_id, total];
-      const orderResult = await client.query(orderQuery, orderValues);
-      const orderId = orderResult.rows[0].id;
-
-      // Insert into order_dishes table
-      if (dishes && dishes.length > 0) {
-        const orderDishesQuery = 'INSERT INTO order_dishes (order_id, dish_id, quantity) VALUES ($1, $2, $3)';
-        for (const dishItem of dishes) {
-          await client.query(orderDishesQuery, [orderId, dishItem.dish_id, dishItem.quantity]);
-        }
+      // Insertar los detalles de la orden
+      for (const dish of dishes) {
+        await client.query(
+          'INSERT INTO order_dishes (order_id, dish_id, quantity) VALUES ($1, $2, $3)',
+          [order.id, dish.dish_id, dish.quantity]
+        );
       }
 
       await client.query('COMMIT');
-      return { id: orderId, customer_id, order_date: new Date(), total, dishes };
+
+      // Retornar la orden completa con sus detalles
+      return this.getById(order.id);
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -45,20 +34,58 @@ const orderModel = {
   },
 
   async getAll() {
-    // This query might need adjustment based on how much detail is needed for a list view
-    const query = 'SELECT * FROM orders';
-    const { rows } = await pool.query(query);
-    return rows;
+    const result = await pool.query(`
+      SELECT 
+        o.id,
+        o.customer_id,
+        o.order_date,
+        SUM(d.price * od.quantity) as total,
+        c.name as customer_name,
+        json_agg(
+          json_build_object(
+            'dish_id', od.dish_id,
+            'dish_name', d.name,
+            'quantity', od.quantity,
+            'price', d.price
+          )
+        ) as order_details
+      FROM orders o
+      LEFT JOIN customers c ON o.customer_id = c.id
+      LEFT JOIN order_dishes od ON o.id = od.order_id
+      LEFT JOIN dishes d ON od.dish_id = d.id
+      GROUP BY o.id, o.customer_id, o.order_date, c.name
+      ORDER BY o.order_date DESC
+    `);
+    return result.rows;
   },
 
   async getById(id) {
-    const query = 'SELECT o.*, json_agg(od.*) as order_items FROM orders o JOIN order_dishes od ON o.id = od.order_id WHERE o.id = $1 GROUP BY o.id';
-    const values = [id];
-    const { rows } = await pool.query(query, values);
-    return rows[0];
+    const result = await pool.query(`
+      SELECT 
+        o.id,
+        o.customer_id,
+        o.order_date,
+        SUM(d.price * od.quantity) as total,
+        c.name as customer_name,
+        json_agg(
+          json_build_object(
+            'dish_id', od.dish_id,
+            'dish_name', d.name,
+            'quantity', od.quantity,
+            'price', d.price
+          )
+        ) as order_details
+      FROM orders o
+      LEFT JOIN customers c ON o.customer_id = c.id
+      LEFT JOIN order_dishes od ON o.id = od.order_id
+      LEFT JOIN dishes d ON od.dish_id = d.id
+      WHERE o.id = $1
+      GROUP BY o.id, o.customer_id, o.order_date, c.name
+    `, [id]);
+    return result.rows[0];
   },
 
-   async find(filterOptions) {
+  async find(filterOptions) {
     let query = 'SELECT * FROM orders WHERE 1=1';
     const values = [];
     let paramIndex = 1;
@@ -80,32 +107,77 @@ const orderModel = {
     return rows;
   },
 
-  // Basic update and delete - might need refinement depending on requirements
   async update(id, total) {
-      const query = 'UPDATE orders SET total = $1 WHERE id = $2 RETURNING *';
-      const values = [total, id];
-      const { rows } = await pool.query(query, values);
-      return rows[0];
+    const result = await pool.query(
+      'UPDATE orders SET total = $1 WHERE id = $2 RETURNING *',
+      [total, id]
+    );
+    return result.rows[0];
   },
 
   async delete(id) {
-      const client = await pool.connect();
-      try {
-          await client.query('BEGIN');
-          // Delete dependent rows in order_dishes first
-          await client.query('DELETE FROM order_dishes WHERE order_id = $1', [id]);
-          // Then delete the order
-          const query = 'DELETE FROM orders WHERE id = $1 RETURNING *';
-          const values = [id];
-          const { rows } = await client.query(query, values);
-          await client.query('COMMIT');
-          return rows[0];
-      } catch (error) {
-          await client.query('ROLLBACK');
-          throw error;
-      } finally {
-          client.release();
-      }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Eliminar los detalles de la orden
+      await client.query('DELETE FROM order_dishes WHERE order_id = $1', [id]);
+
+      // Eliminar la orden
+      const result = await client.query('DELETE FROM orders WHERE id = $1 RETURNING *', [id]);
+
+      await client.query('COMMIT');
+      return result.rows[0];
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
+
+  async filter(filterOptions) {
+    let query = `
+      SELECT 
+        o.id,
+        o.customer_id,
+        o.order_date,
+        SUM(d.price * od.quantity) as total,
+        c.name as customer_name,
+        json_agg(
+          json_build_object(
+            'dish_id', od.dish_id,
+            'dish_name', d.name,
+            'quantity', od.quantity,
+            'price', d.price
+          )
+        ) as order_details
+      FROM orders o
+      LEFT JOIN customers c ON o.customer_id = c.id
+      LEFT JOIN order_dishes od ON o.id = od.order_id
+      LEFT JOIN dishes d ON od.dish_id = d.id
+      WHERE 1=1
+    `;
+    const params = [];
+    let paramCount = 1;
+
+    if (filterOptions.customer_id) {
+      query += ` AND o.customer_id = $${paramCount}`;
+      params.push(filterOptions.customer_id);
+      paramCount++;
+    }
+
+    if (filterOptions.date) {
+      query += ` AND DATE(o.order_date) = $${paramCount}`;
+      params.push(filterOptions.date);
+      paramCount++;
+    }
+
+    query += ` GROUP BY o.id, o.customer_id, o.order_date, c.name
+               ORDER BY o.order_date DESC`;
+
+    const result = await pool.query(query, params);
+    return result.rows;
   },
 };
 
