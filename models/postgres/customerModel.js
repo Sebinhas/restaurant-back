@@ -4,7 +4,7 @@ const customerModel = {
   async create(name, email, phone) {
     const query = 'INSERT INTO customers (name, email, phone) VALUES ($1, $2, $3) RETURNING *';
     const values = [name, email, phone];
-    const { rows } = await pool.query(query, values);
+    const { rows } = await pool.query(query, valuse);
     return rows[0];
   },
 
