@@ -18,6 +18,21 @@ app.use(cors({
 
 app.use(express.json());
 
+// Ruta de prueba
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'API del Restaurante funcionando correctamente',
+    endpoints: {
+      customers: '/api/customers',
+      tables: '/api/tables',
+      dishes: '/api/dishes',
+      orders: '/api/orders',
+      reservations: '/api/reservations',
+      reviews: '/api/reviews'
+    }
+  });
+});
+
 // Rutas
 app.use('/api/customers', require('./routes/customerRoutes'));
 app.use('/api/tables', require('./routes/tableRoutes'));
